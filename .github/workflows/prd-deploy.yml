@@ -1,0 +1,51 @@
+name: Prd Deploy
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      prd_tag:
+        description: Production tag to deploy (created automatically after preprod checks)
+        required: true
+
+jobs:
+  prd-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate tag format
+        run: |
+          tag="$GITHUB_REF"
+          if [[ ! "$tag" =~ ^refs/tags/v[0-9]+\.[0-9]+\.[0-9]+-prd$ ]]; then
+            echo "Invalid tag format: $tag (expected vx.x.x-prd)"
+            exit 1
+          fi
+      - name: Ensure tag exists
+        run: |
+          tag="${{ github.event.inputs.prd_tag }}"
+          url="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}"
+          if ! git ls-remote --tags "$url" "refs/tags/${tag}" | grep -q "${tag}$"; then
+            echo "Tag ${tag} does not exist in the repository."
+            exit 1
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Ensure matching preprod tag exists
+        run: |
+          tag="${{ github.event.inputs.prd_tag }}"
+          preprod_tag="${tag/-prd/-preprod}"
+          url="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}"
+          if ! git ls-remote --tags "$url" "refs/tags/${preprod_tag}" | grep -q "${preprod_tag}$"; then
+            echo "Matching preprod tag ${preprod_tag} does not exist."
+            exit 1
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.prd_tag }}
+      - name: Mock production deployment
+        run: |
+          echo "Deploying tag ${{ github.event.inputs.prd_tag }} to production."
+          echo "TODO: replace with real production deployment script (Terraform apply, smoke tests)."
