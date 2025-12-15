@@ -1,0 +1,108 @@
+name: Preprod Deploy
+
+permissions:
+  contents: write
+
+on:
+  workflow_run:
+    workflows:
+      - E2E Tests
+      - E2E Sql Tests
+    types:
+      - completed
+
+jobs:
+  gate-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      # Verify latest (not based on commit hash as not all changes require E2E) runs of E2E workflows on master succeeded
+      - name: Verify workflows succeeded on master and are latest
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const sha = context.payload.workflow_run.head_sha;
+            const branch = context.payload.workflow_run.head_branch;
+            if (branch !== 'master') {
+              core.setFailed(`Preprod deploy only runs for master. Current branch: ${branch}`);
+              return;
+            }
+            const workflowsToCheck = ['e2e.yml', 'e2e-sql.yml'];
+            for (const wf of workflowsToCheck) {
+              const runs = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: wf,
+                branch,
+                per_page: 1,
+                status: 'completed'
+              });
+              if (!runs.data.workflow_runs.length) {
+                core.setFailed(`No completed workflow runs found for ${wf} on branch ${branch}`);
+                return;
+              }
+              const run = runs.data.workflow_runs[0];
+              if (run.head_sha !== sha) {
+                core.setFailed(`${wf} latest completed run is not for sha ${sha} (found ${run.head_sha}).`);
+                return;
+              }
+              if (run.conclusion !== 'success') {
+                core.setFailed(`${wf} latest run for sha ${sha} is not successful (status: ${run.conclusion})`);
+                return;
+              }
+            }
+            core.info('All required E2E workflows succeeded on master; proceeding to preprod deploy.');
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+      # Compute next semver and create preprod tag
+      - name: Compute next semver (patch)
+        id: semver
+        uses: anothrNick/github-tag-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEFAULT_BUMP: patch
+          WITH_V: true
+          DRY_RUN: true
+      - name: Create preprod tag
+        id: create-preprod-tag
+        uses: actions/github-script@v7
+        env:
+          NEW_TAG: ${{ steps.semver.outputs.new_tag }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          result-encoding: string
+          script: |
+            const sha = context.payload.workflow_run.head_sha;
+            const base = process.env.NEW_TAG;
+            if (!base) {
+              core.setFailed('Missing NEW_TAG from semver step');
+              return;
+            }
+            const tagName = `${base}-preprod`;
+            const ref = `refs/tags/${tagName}`;
+            try {
+              await github.git.createRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref,
+                sha
+              });
+              core.info(`Created tag ${tagName}`);
+            } catch (error) {
+              if (error.status === 422) {
+                core.info(`Tag ${tagName} already exists, leaving as-is.`);
+              } else {
+                throw error;
+              }
+            }
+            return tagName;
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - name: Mock preprod deployment
+        run: |
+          echo "Deploying commit ${GITHUB_SHA} to preprod (tag ${{ steps.create-preprod-tag.outputs.result }})"
+          echo "TODO: tag docker images with immutable preprod tags."
+          echo "TODO: replace with deployment script (e.g. Terraform apply and ECR push) to preprod stack."

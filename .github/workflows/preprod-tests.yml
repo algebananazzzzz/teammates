@@ -1,0 +1,58 @@
+name: Preprod Verification (placeholder)
+
+permissions:
+  contents: write
+
+on:
+  workflow_run:
+    workflows:
+      - Preprod Deploy
+    types:
+      - completed
+
+jobs:
+  preprod-tests:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "Here's where we can run synthetic tests, LnP, smoke tests or other preprod checks against deployed environment."
+          echo "Examples:"
+          echo "- ./gradlew lnpTests pointing to preprod endpoints"
+          echo "- REST/health checks and synthetic user flows"
+      - name: Create production tag from preprod tag
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const sha = context.payload.workflow_run.head_sha;
+            // Find a preprod tag pointing to this SHA
+            const refs = await github.rest.git.listMatchingRefs({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: 'tags/',
+              per_page: 100,
+            });
+            const preprodRef = refs.data.find(r => r.object.sha === sha && r.ref.endsWith('-preprod'));
+            if (!preprodRef) {
+              core.setFailed(`No preprod tag found for sha ${sha}`);
+              return;
+            }
+            const preprodTag = preprodRef.ref.replace('refs/tags/', '');
+            const prdTag = preprodTag.replace(/-preprod$/, '-prd');
+            const ref = `refs/tags/${prdTag}`;
+            try {
+              await github.git.createRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref,
+                sha
+              });
+              core.info(`Created production tag ${prdTag}`);
+            } catch (error) {
+              if (error.status === 422) {
+                core.info(`Production tag ${prdTag} already exists, leaving as-is.`);
+              } else {
+                throw error;
+              }
+            }
